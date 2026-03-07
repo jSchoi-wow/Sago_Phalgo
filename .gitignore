@@ -205,3 +205,15 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# 데이터 캐시
+data/cache/
+
+# 학습된 모델
+saved_models/
+
+# 백테스트 결과
+results/
+
+# Claude 내부 설정
+.claude/
