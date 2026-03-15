@@ -146,9 +146,11 @@ class GlobalLog:
         QMetaObject.invokeMethod(
             inst, "append", Qt.ConnectionType.QueuedConnection, Q_ARG(str, html)
         )
+        # 스크롤을 맨 아래로 (scrollbar 직접 제어)
+        sb = inst.verticalScrollBar()
         QMetaObject.invokeMethod(
-            inst, "moveCursor", Qt.ConnectionType.QueuedConnection,
-            Q_ARG(QTextCursor.MoveOperation, QTextCursor.MoveOperation.End)
+            sb, "setValue", Qt.ConnectionType.QueuedConnection,
+            Q_ARG(int, sb.maximum())
         )
 
 
