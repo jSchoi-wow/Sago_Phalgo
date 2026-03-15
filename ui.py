@@ -683,13 +683,21 @@ class MainWindow(QMainWindow):
         btn_row_conn = QHBoxLayout()
         btn_conn = QPushButton("🔌  연결 테스트")
         btn_conn.clicked.connect(self._kis_connect)
+        btn_save_cred = QPushButton("💾  저장")
+        btn_save_cred.setObjectName("secondary")
+        btn_save_cred.setFixedWidth(70)
+        btn_save_cred.clicked.connect(self._kis_save_credentials)
         self.kis_conn_status = QLabel("● 미연결")
         self.kis_conn_status.setStyleSheet(f"color:{DANGER};font-weight:bold;")
         btn_row_conn.addWidget(btn_conn)
+        btn_row_conn.addWidget(btn_save_cred)
         btn_row_conn.addWidget(self.kis_conn_status)
         btn_row_conn.addStretch()
         cgl.addLayout(btn_row_conn, 3, 0, 1, 2)
         top_row.addWidget(conn_grp, 3)
+
+        # 저장된 인증정보 자동 불러오기
+        self._kis_load_credentials()
 
         # 오른쪽: 잔고 카드
         bal_grp = QGroupBox("계좌 잔고")
@@ -803,17 +811,25 @@ class MainWindow(QMainWindow):
 
         def _conn():
             from trading.kis_api import KISApi
-            api = KISApi()
-            ok  = api.check_connection()
-            if ok:
+            try:
+                api = KISApi()
+                ok  = api.check_connection()
+                if not ok:
+                    raise RuntimeError("토큰 발급 실패")
                 self._kis_api = api
+
+                # 삼성전자 현재가로 실제 조회 확인
+                info = api.get_price("005930")
                 self.kis_conn_status.setText("● 연결됨")
                 self.kis_conn_status.setStyleSheet(f"color:{SUCCESS};font-weight:bold;")
-                GlobalLog.write("KIS API 연결 성공", "ok")
-            else:
+                GlobalLog.write(
+                    f"KIS API 연결 성공 ✅ | "
+                    f"삼성전자 현재가: {info['price']:,}원 ({info['change_pct']:+.2f}%)", "ok"
+                )
+            except Exception as e:
                 self.kis_conn_status.setText("● 연결 실패")
                 self.kis_conn_status.setStyleSheet(f"color:{DANGER};font-weight:bold;")
-                GlobalLog.write("KIS API 연결 실패 – APP_KEY/SECRET 확인", "error")
+                GlobalLog.write(f"KIS API 연결 실패: {e}", "error")
 
         import threading
         threading.Thread(target=_conn, daemon=True).start()
@@ -823,9 +839,30 @@ class MainWindow(QMainWindow):
         key     = self.kis_app_key.text().strip()
         secret  = self.kis_app_secret.text().strip()
         account = self.kis_account.text().strip()
-        if key:     cfg.APP_KEY     = key
-        if secret:  cfg.APP_SECRET  = secret
-        if account: cfg.ACCOUNT_NO  = account
+        if key:     cfg.APP_KEY    = key
+        if secret:  cfg.APP_SECRET = secret
+        if account: cfg.ACCOUNT_NO = account
+
+    def _kis_save_credentials(self):
+        from config.credentials import save as cred_save
+        key     = self.kis_app_key.text().strip()
+        secret  = self.kis_app_secret.text().strip()
+        account = self.kis_account.text().strip()
+        if not key or not secret or not account:
+            GlobalLog.write("APP KEY / SECRET / 계좌번호를 모두 입력하세요", "warn")
+            return
+        cred_save(key, secret, account)
+        GlobalLog.write("인증 정보 저장 완료 (config/credentials.json)", "ok")
+
+    def _kis_load_credentials(self):
+        from config.credentials import load as cred_load
+        cred = cred_load()
+        if cred.get("app_key"):
+            self.kis_app_key.setText(cred["app_key"])
+        if cred.get("app_secret"):
+            self.kis_app_secret.setText(cred["app_secret"])
+        if cred.get("account_no"):
+            self.kis_account.setText(cred["account_no"])
 
     # ── 잔고 조회 ─────────────────────────────────────────────────────
     def _kis_get_balance(self):
