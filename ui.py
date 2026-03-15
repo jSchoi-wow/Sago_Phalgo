@@ -20,6 +20,7 @@ from PyQt6.QtWidgets import (
     QPushButton, QLabel, QComboBox, QTextEdit, QTabWidget,
     QSplitter, QFrame, QProgressBar, QLineEdit, QGroupBox,
     QScrollArea, QGridLayout, QSizePolicy, QDockWidget,
+    QTableWidget, QTableWidgetItem, QHeaderView, QSpinBox,
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QMetaObject, Q_ARG
 from PyQt6.QtGui import QFont, QColor, QPalette, QTextCursor
@@ -247,8 +248,10 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self._tab_trading(),  "💹  실시간 거래")
         layout.addWidget(self.tabs)
 
-        # 자동매매 엔진 (탭에서 공유)
-        self._trader = None
+        # 자동매매 엔진 / 스케줄러 (탭에서 공유)
+        self._trader    = None
+        self._scheduler = None
+        self._kis_api   = None
 
         # 상태바
         self.status_bar = QLabel("준비")
@@ -651,113 +654,142 @@ class MainWindow(QMainWindow):
 
     # ── 탭5: 실시간 거래 ──────────────────────────────────────────────
     def _tab_trading(self):
-        w = QWidget(); lay = QVBoxLayout(w); lay.setSpacing(12)
+        w = QWidget(); lay = QVBoxLayout(w); lay.setSpacing(10)
 
-        # ── API 연결 설정 ──────────────────────────────────────────
+        # ── 상단: API 설정 + 잔고 (좌우 분할) ────────────────────
+        top_row = QHBoxLayout()
+
+        # 왼쪽: API 연결 설정
         conn_grp = QGroupBox("KIS API 연결 설정")
         cgl = QGridLayout(conn_grp)
-        cgl.addWidget(QLabel("APP KEY:"),    0, 0)
-        self.kis_app_key = QLineEdit(); self.kis_app_key.setPlaceholderText("발급받은 APP KEY 입력")
+        cgl.setVerticalSpacing(6)
+
+        cgl.addWidget(QLabel("APP KEY:"), 0, 0)
+        self.kis_app_key = QLineEdit()
+        self.kis_app_key.setPlaceholderText("발급받은 APP KEY")
         cgl.addWidget(self.kis_app_key, 0, 1)
 
         cgl.addWidget(QLabel("APP SECRET:"), 1, 0)
-        self.kis_app_secret = QLineEdit(); self.kis_app_secret.setPlaceholderText("발급받은 APP SECRET 입력")
+        self.kis_app_secret = QLineEdit()
+        self.kis_app_secret.setPlaceholderText("발급받은 APP SECRET")
         self.kis_app_secret.setEchoMode(QLineEdit.EchoMode.Password)
         cgl.addWidget(self.kis_app_secret, 1, 1)
 
-        cgl.addWidget(QLabel("계좌번호:"),   2, 0)
-        self.kis_account = QLineEdit(); self.kis_account.setPlaceholderText("예) 12345678  (앞 8자리)")
+        cgl.addWidget(QLabel("계좌번호:"), 2, 0)
+        self.kis_account = QLineEdit()
+        self.kis_account.setPlaceholderText("앞 8자리  예) 12345678")
         cgl.addWidget(self.kis_account, 2, 1)
 
-        cgl.addWidget(QLabel("계좌상품:"),   3, 0)
-        self.kis_prod = QLineEdit("01"); self.kis_prod.setFixedWidth(60)
-        cgl.addWidget(self.kis_prod, 3, 1)
-
-        self.kis_conn_status = QLabel("● 미연결")
-        self.kis_conn_status.setStyleSheet(f"color: {DANGER}; font-weight: bold;")
-        cgl.addWidget(self.kis_conn_status, 4, 0, 1, 2)
-
+        btn_row_conn = QHBoxLayout()
         btn_conn = QPushButton("🔌  연결 테스트")
         btn_conn.clicked.connect(self._kis_connect)
-        cgl.addWidget(btn_conn, 5, 0, 1, 2)
-        lay.addWidget(conn_grp)
+        self.kis_conn_status = QLabel("● 미연결")
+        self.kis_conn_status.setStyleSheet(f"color:{DANGER};font-weight:bold;")
+        btn_row_conn.addWidget(btn_conn)
+        btn_row_conn.addWidget(self.kis_conn_status)
+        btn_row_conn.addStretch()
+        cgl.addLayout(btn_row_conn, 3, 0, 1, 2)
+        top_row.addWidget(conn_grp, 3)
 
-        # ── 잔고 조회 ──────────────────────────────────────────────
+        # 오른쪽: 잔고 카드
         bal_grp = QGroupBox("계좌 잔고")
         bgl = QVBoxLayout(bal_grp)
-
-        bal_btn_row = QHBoxLayout()
         btn_bal = QPushButton("💰  잔고 조회")
         btn_bal.clicked.connect(self._kis_get_balance)
-        bal_btn_row.addWidget(btn_bal); bal_btn_row.addStretch()
-        bgl.addLayout(bal_btn_row)
+        bgl.addWidget(btn_bal)
 
         self.bal_cards = {}
         bal_row = QHBoxLayout()
-        for key, label in [("cash", "예수금"), ("total_eval", "평가총액"), ("n_pos", "보유종목")]:
+        for key, label in [("cash","예수금"),("total_eval","평가총액"),("n_pos","보유종목수")]:
             card, val = self._make_metric_card(label, "-")
+            card.setFixedHeight(72)
             self.bal_cards[key] = val
             bal_row.addWidget(card)
         bgl.addLayout(bal_row)
 
         self.pos_text = QTextEdit()
         self.pos_text.setReadOnly(True)
-        self.pos_text.setFixedHeight(120)
-        self.pos_text.setPlaceholderText("잔고 조회 버튼을 누르면 보유 종목이 표시됩니다")
+        self.pos_text.setFixedHeight(56)
+        self.pos_text.setPlaceholderText("보유 종목이 여기 표시됩니다")
         bgl.addWidget(self.pos_text)
-        lay.addWidget(bal_grp)
+        top_row.addWidget(bal_grp, 4)
+        lay.addLayout(top_row)
 
-        # ── 자동매매 ───────────────────────────────────────────────
-        auto_grp = QGroupBox("자동매매")
-        agl = QVBoxLayout(auto_grp)
+        # ── 자동매매 설정 ──────────────────────────────────────────
+        auto_grp = QGroupBox("자동매매 설정")
+        agl = QHBoxLayout(auto_grp)
 
-        opt_row = QHBoxLayout()
-        opt_row.addWidget(QLabel("감시 종목:"))
+        agl.addWidget(QLabel("감시 종목:"))
         self.trade_codes = QLineEdit("005930,000660,035420")
-        opt_row.addWidget(self.trade_codes)
-        opt_row.addWidget(QLabel("1회 매수금액(원):"))
-        self.trade_amount = QLineEdit("500000"); self.trade_amount.setFixedWidth(100)
-        opt_row.addWidget(self.trade_amount)
-        agl.addLayout(opt_row)
+        agl.addWidget(self.trade_codes)
 
-        btn_row2 = QHBoxLayout()
+        agl.addWidget(QLabel("1회 매수(원):"))
+        self.trade_amount = QLineEdit("500000"); self.trade_amount.setFixedWidth(90)
+        agl.addWidget(self.trade_amount)
+
+        agl.addWidget(QLabel("신호 주기(분):"))
+        self.trade_interval = QSpinBox()
+        self.trade_interval.setRange(1, 60); self.trade_interval.setValue(5)
+        self.trade_interval.setFixedWidth(60)
+        agl.addWidget(self.trade_interval)
+
         self.btn_trade_start = QPushButton("▶  자동매매 시작")
         self.btn_trade_start.clicked.connect(self._kis_start_trading)
-        self.btn_trade_stop = QPushButton("■  중지")
+        self.btn_trade_stop  = QPushButton("■  중지")
         self.btn_trade_stop.setObjectName("danger")
         self.btn_trade_stop.clicked.connect(self._kis_stop_trading)
         self.btn_trade_stop.setEnabled(False)
-        btn_row2.addWidget(self.btn_trade_start)
-        btn_row2.addWidget(self.btn_trade_stop)
-        btn_row2.addStretch()
-        agl.addLayout(btn_row2)
+        agl.addWidget(self.btn_trade_start)
+        agl.addWidget(self.btn_trade_stop)
 
         self.trade_status = QLabel("● 정지")
-        self.trade_status.setStyleSheet(f"color: {SUBTEXT}; font-weight: bold;")
+        self.trade_status.setStyleSheet(f"color:{SUBTEXT};font-weight:bold;")
         agl.addWidget(self.trade_status)
+        agl.addStretch()
+        lay.addWidget(auto_grp)
 
-        # 수동 신호 테스트
-        sig_row = QHBoxLayout()
-        sig_row.addWidget(QLabel("수동 신호 테스트:"))
+        # ── 실시간 신호 테이블 ─────────────────────────────────────
+        sig_grp = QGroupBox("실시간 신호 현황")
+        sgl = QVBoxLayout(sig_grp)
+
+        sig_btn_row = QHBoxLayout()
         self.sig_code = QComboBox()
         for name, code in STOCK_LIST.items():
             self.sig_code.addItem(f"{name} ({code})", code)
-        sig_row.addWidget(self.sig_code)
-        btn_buy_sig  = QPushButton("매수 신호")
-        btn_sell_sig = QPushButton("매도 신호"); btn_sell_sig.setObjectName("danger")
+        btn_buy_sig  = QPushButton("▲ 수동 매수")
+        btn_sell_sig = QPushButton("▼ 수동 매도"); btn_sell_sig.setObjectName("danger")
         btn_buy_sig.clicked.connect(lambda: self._manual_signal(1))
         btn_sell_sig.clicked.connect(lambda: self._manual_signal(-1))
-        sig_row.addWidget(btn_buy_sig); sig_row.addWidget(btn_sell_sig)
-        sig_row.addStretch()
-        agl.addLayout(sig_row)
-        lay.addWidget(auto_grp)
+        sig_btn_row.addWidget(QLabel("수동 신호:"))
+        sig_btn_row.addWidget(self.sig_code)
+        sig_btn_row.addWidget(btn_buy_sig)
+        sig_btn_row.addWidget(btn_sell_sig)
+        sig_btn_row.addStretch()
+        sgl.addLayout(sig_btn_row)
+
+        cols = ["종목코드","현재가","등락률","규칙신호","XGB확률","LSTM예측","통합신호","신뢰도","시장"]
+        self.signal_table = QTableWidget(0, len(cols))
+        self.signal_table.setHorizontalHeaderLabels(cols)
+        self.signal_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.signal_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.signal_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.signal_table.setAlternatingRowColors(True)
+        self.signal_table.setStyleSheet(
+            f"QTableWidget {{background:{SURFACE};color:{TEXT};gridline-color:{BORDER};}}"
+            f"QTableWidget::item:alternate {{background:#252535;}}"
+            f"QHeaderView::section {{background:{BG};color:{SUBTEXT};padding:4px;border:1px solid {BORDER};}}"
+        )
+        self.signal_table.setFixedHeight(200)
+        self._signal_row_map: dict = {}   # code → row index
+        sgl.addWidget(self.signal_table)
+        lay.addWidget(sig_grp)
 
         # ── 주문 내역 ──────────────────────────────────────────────
         hist_grp = QGroupBox("주문 내역")
         hgl = QVBoxLayout(hist_grp)
         self.order_hist_text = QTextEdit()
         self.order_hist_text.setReadOnly(True)
-        self.order_hist_text.setFixedHeight(130)
+        self.order_hist_text.setFixedHeight(110)
         self.order_hist_text.setPlaceholderText("주문 발생 시 여기에 표시됩니다")
         hgl.addWidget(self.order_hist_text)
         lay.addWidget(hist_grp)
@@ -774,29 +806,26 @@ class MainWindow(QMainWindow):
             api = KISApi()
             ok  = api.check_connection()
             if ok:
+                self._kis_api = api
                 self.kis_conn_status.setText("● 연결됨")
-                self.kis_conn_status.setStyleSheet(f"color: {SUCCESS}; font-weight: bold;")
+                self.kis_conn_status.setStyleSheet(f"color:{SUCCESS};font-weight:bold;")
                 GlobalLog.write("KIS API 연결 성공", "ok")
             else:
                 self.kis_conn_status.setText("● 연결 실패")
-                self.kis_conn_status.setStyleSheet(f"color: {DANGER}; font-weight: bold;")
+                self.kis_conn_status.setStyleSheet(f"color:{DANGER};font-weight:bold;")
                 GlobalLog.write("KIS API 연결 실패 – APP_KEY/SECRET 확인", "error")
 
         import threading
         threading.Thread(target=_conn, daemon=True).start()
 
     def _apply_kis_config(self):
-        """UI 입력값을 kis_config에 반영"""
         import config.kis_config as cfg
         key     = self.kis_app_key.text().strip()
         secret  = self.kis_app_secret.text().strip()
         account = self.kis_account.text().strip()
-        prod    = self.kis_prod.text().strip() or "01"
-        if key:    cfg.APP_KEY     = key
-        if secret: cfg.APP_SECRET  = secret
-        if account:
-            cfg.ACCOUNT_NO   = account
-            cfg.ACCOUNT_PROD = prod
+        if key:     cfg.APP_KEY     = key
+        if secret:  cfg.APP_SECRET  = secret
+        if account: cfg.ACCOUNT_NO  = account
 
     # ── 잔고 조회 ─────────────────────────────────────────────────────
     def _kis_get_balance(self):
@@ -805,23 +834,20 @@ class MainWindow(QMainWindow):
         def _bal():
             from trading.kis_api import KISApi
             try:
-                api = KISApi()
+                api = self._kis_api or KISApi()
                 bal = api.get_balance()
                 self.bal_cards["cash"].setText(f"{bal['cash']:,}원")
                 self.bal_cards["total_eval"].setText(f"{bal['total_eval']:,}원")
                 self.bal_cards["n_pos"].setText(f"{len(bal['positions'])}종목")
-
                 lines = []
                 for p in bal["positions"]:
                     sign = "+" if p["pnl_pct"] >= 0 else ""
                     lines.append(
-                        f"  {p['name']} ({p['code']})  "
-                        f"{p['qty']}주  "
+                        f"{p['name']}({p['code']}) {p['qty']}주  "
                         f"평균 {p['avg_price']:,}원  "
-                        f"평가 {p['eval_value']:,}원  "
                         f"({sign}{p['pnl_pct']:.2f}%)"
                     )
-                self.pos_text.setPlainText("\n".join(lines) if lines else "보유 종목 없음")
+                self.pos_text.setPlainText("  |  ".join(lines) if lines else "보유 종목 없음")
                 GlobalLog.write(f"잔고 조회 완료 | 예수금 {bal['cash']:,}원", "ok")
             except Exception as e:
                 GlobalLog.write(f"잔고 조회 실패: {e}", "error")
@@ -833,37 +859,100 @@ class MainWindow(QMainWindow):
     def _kis_start_trading(self):
         self._apply_kis_config()
         codes = [c.strip() for c in self.trade_codes.text().split(",") if c.strip()]
+        if not codes:
+            GlobalLog.write("감시 종목을 입력하세요", "error"); return
         try:
-            amount = int(self.trade_amount.text().strip())
             import config.kis_config as cfg
-            cfg.ORDER_AMOUNT = amount
+            cfg.ORDER_AMOUNT = int(self.trade_amount.text().strip())
         except ValueError:
-            GlobalLog.write("매수금액이 올바르지 않습니다", "error")
-            return
+            GlobalLog.write("매수금액이 올바르지 않습니다", "error"); return
 
+        interval = self.trade_interval.value()
+
+        from trading.kis_api    import KISApi
         from trading.auto_trader import AutoTrader
-        self._trader = AutoTrader(log_fn=lambda msg, *a: GlobalLog.write(msg, "info"))
+        from trading.scheduler  import SignalScheduler
+
+        def _log(msg, lv="info"): GlobalLog.write(msg, lv)
+
+        self._kis_api = KISApi()
+        self._trader  = AutoTrader(log_fn=_log)
         self._trader.start(watch_codes=codes)
 
+        # 신호 테이블 초기화
+        self._signal_row_map = {}
+        self.signal_table.setRowCount(0)
+        for code in codes:
+            row = self.signal_table.rowCount()
+            self.signal_table.insertRow(row)
+            self.signal_table.setItem(row, 0, QTableWidgetItem(code))
+            self._signal_row_map[code] = row
+
+        self._scheduler = SignalScheduler(
+            trader=self._trader,
+            kis_api=self._kis_api,
+            log_fn=_log,
+            signal_cb=self._update_signal_row,
+        )
+        self._scheduler.start(watch_codes=codes, interval_min=interval)
+
         self.trade_status.setText("● 실행 중")
-        self.trade_status.setStyleSheet(f"color: {SUCCESS}; font-weight: bold;")
+        self.trade_status.setStyleSheet(f"color:{SUCCESS};font-weight:bold;")
         self.btn_trade_start.setEnabled(False)
         self.btn_trade_stop.setEnabled(True)
 
     def _kis_stop_trading(self):
+        if self._scheduler:
+            self._scheduler.stop(); self._scheduler = None
         if self._trader:
-            self._trader.stop()
-            self._trader = None
+            self._trader.stop();    self._trader    = None
         self.trade_status.setText("● 정지")
-        self.trade_status.setStyleSheet(f"color: {SUBTEXT}; font-weight: bold;")
+        self.trade_status.setStyleSheet(f"color:{SUBTEXT};font-weight:bold;")
         self.btn_trade_start.setEnabled(True)
         self.btn_trade_stop.setEnabled(False)
+
+    # ── 신호 테이블 행 업데이트 (스레드 안전) ─────────────────────────
+    def _update_signal_row(self, code: str, row: dict):
+        if code not in self._signal_row_map:
+            r = self.signal_table.rowCount()
+            self.signal_table.insertRow(r)
+            self._signal_row_map[code] = r
+
+        r = self._signal_row_map[code]
+        vals = [
+            code,
+            row.get("price", "-"),
+            row.get("change", "-"),
+            row.get("rule", "-"),
+            row.get("xgb", "-"),
+            row.get("lstm", "-"),
+            row.get("signal", "-"),
+            row.get("confidence", "-"),
+            row.get("cycle", "-"),
+        ]
+        signal_txt = row.get("signal", "")
+        for col, val in enumerate(vals):
+            item = QTableWidgetItem(str(val))
+            item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            if col == 6:  # 통합신호 열 색상
+                if "매수" in signal_txt:
+                    item.setForeground(QColor(SUCCESS))
+                elif "매도" in signal_txt:
+                    item.setForeground(QColor(DANGER))
+                else:
+                    item.setForeground(QColor(SUBTEXT))
+            if col == 2:  # 등락률 색상
+                try:
+                    v = float(val.replace("%",""))
+                    item.setForeground(QColor(SUCCESS if v >= 0 else DANGER))
+                except Exception:
+                    pass
+            self.signal_table.setItem(r, col, item)
 
     # ── 수동 신호 테스트 ──────────────────────────────────────────────
     def _manual_signal(self, signal: int):
         if not self._trader:
-            GlobalLog.write("자동매매를 먼저 시작하세요", "warn")
-            return
+            GlobalLog.write("자동매매를 먼저 시작하세요", "warn"); return
         code = self.sig_code.currentData()
         name = self.sig_code.currentText()
         side = "매수" if signal == 1 else "매도"
@@ -871,8 +960,7 @@ class MainWindow(QMainWindow):
         import threading
         threading.Thread(
             target=self._trader.on_signal,
-            args=(code, signal, 1.0),
-            daemon=True,
+            args=(code, signal, 1.0), daemon=True,
         ).start()
 
     # ── 종목 분석 실행 ─────────────────────────────────────────────
