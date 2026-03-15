@@ -741,7 +741,16 @@ class MainWindow(QMainWindow):
         self.trade_interval.setFixedWidth(60)
         agl.addWidget(self.trade_interval)
 
-        self.btn_trade_start = QPushButton("▶  자동매매 시작")
+        agl.addWidget(QLabel("모드:"))
+        self.trade_mode = QComboBox()
+        self.trade_mode.addItem("📊 신호 감시만 (주문 없음)", "dry")
+        self.trade_mode.addItem("💸 실제 매매", "real")
+        self.trade_mode.setFixedWidth(200)
+        self.trade_mode.setStyleSheet(f"color:{WARNING};font-weight:bold;")
+        self.trade_mode.currentIndexChanged.connect(self._on_trade_mode_changed)
+        agl.addWidget(self.trade_mode)
+
+        self.btn_trade_start = QPushButton("▶  시작")
         self.btn_trade_start.clicked.connect(self._kis_start_trading)
         self.btn_trade_stop  = QPushButton("■  중지")
         self.btn_trade_stop.setObjectName("danger")
@@ -892,28 +901,39 @@ class MainWindow(QMainWindow):
         import threading
         threading.Thread(target=_bal, daemon=True).start()
 
+    def _on_trade_mode_changed(self, idx):
+        is_real = self.trade_mode.currentData() == "real"
+        color   = DANGER if is_real else WARNING
+        self.trade_mode.setStyleSheet(f"color:{color};font-weight:bold;")
+        self.trade_amount.setEnabled(is_real)
+
     # ── 자동매매 시작 / 중지 ──────────────────────────────────────────
     def _kis_start_trading(self):
         self._apply_kis_config()
         codes = [c.strip() for c in self.trade_codes.text().split(",") if c.strip()]
         if not codes:
             GlobalLog.write("감시 종목을 입력하세요", "error"); return
-        try:
-            import config.kis_config as cfg
-            cfg.ORDER_AMOUNT = int(self.trade_amount.text().strip())
-        except ValueError:
-            GlobalLog.write("매수금액이 올바르지 않습니다", "error"); return
+
+        dry_run = self.trade_mode.currentData() == "dry"
+
+        if not dry_run:
+            try:
+                import config.kis_config as cfg
+                cfg.ORDER_AMOUNT = int(self.trade_amount.text().strip())
+            except ValueError:
+                GlobalLog.write("매수금액이 올바르지 않습니다", "error"); return
 
         interval = self.trade_interval.value()
 
-        from trading.kis_api    import KISApi
+        from trading.kis_api     import KISApi
         from trading.auto_trader import AutoTrader
-        from trading.scheduler  import SignalScheduler
+        from trading.scheduler   import SignalScheduler
 
         def _log(msg, lv="info"): GlobalLog.write(msg, lv)
 
         self._kis_api = KISApi()
-        self._trader  = AutoTrader(log_fn=_log)
+        self._kis_api.check_connection()   # 토큰 1회 발급
+        self._trader  = AutoTrader(log_fn=_log, dry_run=dry_run, api=self._kis_api)
         self._trader.start(watch_codes=codes)
 
         # 신호 테이블 초기화

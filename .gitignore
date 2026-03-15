@@ -220,3 +220,4 @@ results/
 
 # API 인증 정보 (보안)
 config/credentials.json
+config/kis_token_cache.json

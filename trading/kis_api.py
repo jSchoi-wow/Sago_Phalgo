@@ -6,11 +6,14 @@
 - 잔고 조회
 """
 
-import time
+import json
 import requests
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import config.kis_config as cfg
+
+_TOKEN_CACHE = Path(__file__).parent.parent / "config" / "kis_token_cache.json"
 
 
 class KISApi:
@@ -23,6 +26,33 @@ class KISApi:
             "appkey":    cfg.APP_KEY,
             "appsecret": cfg.APP_SECRET,
         })
+        # 캐시된 토큰 자동 로드
+        self._load_token_cache()
+
+    # ── 토큰 캐시 저장/로드 ────────────────────────────────────────────
+    def _save_token_cache(self):
+        try:
+            data = {
+                "token":   self._token,
+                "expired": self._token_expired.isoformat(),
+            }
+            _TOKEN_CACHE.write_text(json.dumps(data), encoding="utf-8")
+        except Exception:
+            pass
+
+    def _load_token_cache(self):
+        try:
+            if not _TOKEN_CACHE.exists():
+                return
+            data    = json.loads(_TOKEN_CACHE.read_text(encoding="utf-8"))
+            expired = datetime.fromisoformat(data["expired"])
+            if datetime.now() < expired:
+                self._token         = data["token"]
+                self._token_expired = expired
+                self.session.headers.update({"authorization": f"Bearer {self._token}"})
+                print(f"[KIS] 캐시된 토큰 사용 (만료: {expired.strftime('%H:%M:%S')})")
+        except Exception:
+            pass
 
     # ── 토큰 ──────────────────────────────────────────────────────────
     def _ensure_token(self):
@@ -44,6 +74,7 @@ class KISApi:
         expires_in          = int(data.get("expires_in", 86400))
         self._token_expired = datetime.now() + timedelta(seconds=expires_in - 60)
         self.session.headers.update({"authorization": f"Bearer {self._token}"})
+        self._save_token_cache()
         print(f"[KIS] 토큰 발급 완료 (만료: {self._token_expired.strftime('%H:%M:%S')})")
 
     # ── 현재가 조회 ────────────────────────────────────────────────────
@@ -189,8 +220,8 @@ class KISApi:
     # ── 계좌 유효성 확인 ───────────────────────────────────────────────
     def check_connection(self) -> bool:
         try:
-            self._issue_token()
-            return True
+            self._ensure_token()   # 캐시 토큰 있으면 재발급 안 함
+            return bool(self._token)
         except Exception as e:
             print(f"[KIS] 연결 실패: {e}")
             return False

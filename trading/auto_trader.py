@@ -16,18 +16,19 @@ from trading.kis_api import KISApi
 class AutoTrader:
     """
     사용법:
-        trader = AutoTrader()
+        trader = AutoTrader(dry_run=True)   # 신호 감시만 (주문 없음)
+        trader = AutoTrader(dry_run=False)  # 실제 주문
         trader.start(watch_codes=["005930", "000660"])
-        # ... 신호 발생 시:
         trader.on_signal("005930", signal=1, confidence=0.8)
         trader.stop()
     """
 
-    def __init__(self, log_fn=None):
-        self.api       = KISApi()
+    def __init__(self, log_fn=None, dry_run: bool = False, api: KISApi = None):
+        self.api       = api or KISApi()   # 외부에서 주입 가능 (토큰 재사용)
         self.running   = False
+        self.dry_run   = dry_run          # True: 신호 감시만, 실제 주문 없음
         self._lock     = threading.Lock()
-        self._log      = log_fn or print   # UI 로그 콜백 or print
+        self._log      = log_fn or print
 
         # 보유 포지션: {code: {"qty": int, "avg_price": int, "entered_at": str}}
         self.positions: dict = {}
@@ -38,21 +39,26 @@ class AutoTrader:
     # ── 시작 / 중지 ────────────────────────────────────────────────────
     def start(self, watch_codes: list[str]):
         if self.running:
-            self._log("[AutoTrader] 이미 실행 중")
+            self._log("[AutoTrader] 이미 실행 중", "warn")
             return
         ok = self.api.check_connection()
         if not ok:
-            self._log("[AutoTrader] KIS API 연결 실패. APP_KEY/SECRET을 확인하세요.")
+            self._log("[AutoTrader] KIS API 연결 실패. APP_KEY/SECRET을 확인하세요.", "error")
             return
 
         self.watch_codes = watch_codes
         self.running     = True
-        self._sync_positions()
-        self._log(f"[AutoTrader] 자동매매 시작 | 감시 종목: {watch_codes}", )
 
-        # 손절/익절 감시 스레드
-        t = threading.Thread(target=self._monitor_loop, daemon=True)
-        t.start()
+        mode = "[신호 감시 모드 - 주문 없음]" if self.dry_run else "[실제 매매 모드]"
+        self._log(f"[AutoTrader] {mode} 시작 | 감시 종목: {watch_codes}", "ok")
+
+        if not self.dry_run:
+            self._sync_positions()
+
+        # 손절/익절 감시 스레드 (실제 매매 모드만)
+        if not self.dry_run:
+            t = threading.Thread(target=self._monitor_loop, daemon=True)
+            t.start()
 
     def stop(self):
         self.running = False
@@ -67,10 +73,21 @@ class AutoTrader:
         if not self.running:
             return
 
+        signal_map = {1: "▲ 매수", -1: "▼ 매도", 0: "─ 홀딩"}
+
+        # 신호 감시 모드: 주문 없이 로그만
+        if self.dry_run:
+            if signal != 0:
+                self._log(
+                    f"[DRY-RUN] {code} | {signal_map[signal]} 신호 | 신뢰도 {confidence:.2f} "
+                    f"(실제 주문 없음)", "info"
+                )
+            return
+
         now = datetime.now()
         # 장 시간 체크 (09:00 ~ 15:20)
         if not (900 <= int(now.strftime("%H%M")) <= 1520):
-            self._log(f"[AutoTrader] 장 외 시간 – 신호 무시 ({code}, signal={signal})")
+            self._log(f"[AutoTrader] 장 외 시간 – 신호 무시 ({code}, {signal_map.get(signal)})", "info")
             return
 
         with self._lock:
